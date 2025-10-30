@@ -33,15 +33,15 @@ HTB WP Integration is a plugin/tool that connects the HackTheBox (HTB) platform 
 
 2. in your Wordpress dashboard, navigate to _Plugins_ > _Add Pugin_
 
-![alt text](image-1.png)
+![alt text](images/image-1.png)
 
 3. Select _Upload Plugin_ (Towards the top of the page)
 
-![alt text](image.png)
+![alt text](images/image.png)
 
 4. Upload the _htb-pro-card.zip_ and select _Install Now_
 
-![alt text](image-2.png)
+![alt text](images/image-2.png)
 
 
 ## Activation
@@ -51,7 +51,7 @@ HTB WP Integration is a plugin/tool that connects the HackTheBox (HTB) platform 
 
 3. Select _Run Test_ to test the connection to HTB Servers.
 
-![alt text](image-3.png)
+![alt text](images/image-3.png)
 
 Optionally style the output via your theme’s CSS or override templates as needed.
 
