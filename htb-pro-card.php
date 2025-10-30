@@ -166,9 +166,17 @@ add_shortcode('htb_pro_card','htb_pro_card_shortcode');
    Gutenberg blocks (server-rendered)
 ------------------------------*/
 add_action('init', function () {
-  $deps = ['wp-blocks','wp-element','wp-components','wp-block-editor','wp-i18n'];
+  $deps = [
+    'wp-blocks',
+    'wp-element',
+    'wp-components',
+    'wp-block-editor',
+    'wp-i18n',
+    'wp-server-side-render', // <-- required for live previews in editor
+  ];
   $ver  = file_exists(__DIR__.'/block.js') ? filemtime(__DIR__.'/block.js') : '1.0';
   wp_register_script('htb-pro-card-blocks', plugins_url('block.js', __FILE__), $deps, $ver, true);
+
 
   // helper wrapper
   $wrap = function($html, $class=''){ $class = $class ? ' class="'.esc_attr($class).'"' : ''; return '<div'.$class.'>'.$html.'</div>'; };
@@ -261,42 +269,100 @@ add_action('init', function () {
     'supports' => ['html'=>false],
   ]);
 
-  // 4) Progress
-  register_block_type('htb/progress', [
-    'api_version'   => 2,
-    'editor_script' => 'htb-pro-card-blocks',
-    'render_callback' => function ($attrs) use ($wrap) {
-      $g = htbp_get_options();
-      $id       = htbp_resolve_id($attrs['id'] ?? '');
-      $ttl      = isset($attrs['ttl']) ? (int)$attrs['ttl'] : (int)$g['ttl'];
-      $json_url = $attrs['json_url'] ?? $g['json_url'];
-      $bar      = $attrs['bar'] ?? '#1aa36b';
-      $track    = $attrs['track'] ?? '#10251e';
+// 4) Progress block with modes (number | bar | circle)
+register_block_type('htb/progress', [
+  'api_version'   => 2,
+  'editor_script' => 'htb-pro-card-blocks',
+  'attributes' => [
+    'id'        => ['type'=>'string','default'=>''],
+    'ttl'       => ['type'=>'number','default'=>43200],
+    'json_url'  => ['type'=>'string','default'=>''],
 
-      if ($id === '' && $json_url === '') return htbp_error_box('HTB: missing user id or JSON URL.');
-      $data = htbp_get_profile($id, $ttl, $json_url);
-      if (is_wp_error($data)) return htbp_error_box($data->get_error_message());
+    'mode'      => ['type'=>'string','default'=>'bar'],
 
-      $p = isset($data['progress']) ? max(0, min(100, (int)$data['progress'])) : 0;
-      $html = '<div style="background:'.esc_attr($track).';border-radius:999px;overflow:hidden;height:10px;width:100%;">'
-            . '<div style="background:'.esc_attr($bar).';height:100%;width:'.$p.'%;"></div></div>'
-            . '<div style="margin-top:6px;font-size:12px;opacity:.8">Progress: '.$p.'%</div>';
-      return $wrap($html, $attrs['className'] ?? '');
-    },
-    'attributes' => [
-      'id'        => ['type'=>'string','default'=>''],
-      'ttl'       => ['type'=>'number','default'=>43200],
-      'json_url'  => ['type'=>'string','default'=>''],
-      'bar'       => ['type'=>'string','default'=>'#1aa36b'],
-      'track'     => ['type'=>'string','default'=>'#10251e'],
-      'className' => ['type'=>'string','default'=>'']
-    ],
-    'title'    => 'HTB: Progress',
-    'category' => 'htbpc',
-    'icon'     => 'performance',
-    'supports' => ['html'=>false],
-  ]);
-});
+    // number
+    'numPrefix' => ['type'=>'string','default'=>''],
+    'numSuffix' => ['type'=>'string','default'=>'%'],
+    'numSize'   => ['type'=>'number','default'=>32],
+    'numColor'  => ['type'=>'string','default'=>'#cde5db'],
+
+    // bar
+    'barColor'   => ['type'=>'string','default'=>'#1aa36b'],
+    'trackColor' => ['type'=>'string','default'=>'#10251e'],
+    'barHeight'  => ['type'=>'number','default'=>10],
+    'barRadius'  => ['type'=>'number','default'=>999],
+
+    // circle
+    'circleSize'   => ['type'=>'number','default'=>120],
+    'circleStroke' => ['type'=>'number','default'=>10],
+    'circleBar'    => ['type'=>'string','default'=>'#1aa36b'],
+    'circleTrack'  => ['type'=>'string','default'=>'#10251e'],
+    'circleText'   => ['type'=>'string','default'=>'#cde5db'],
+  ],
+  'render_callback' => function ($attrs) {
+    $g = htbp_get_options();
+    $id       = htbp_resolve_id($attrs['id'] ?? '');
+    $ttl      = isset($attrs['ttl']) ? (int)$attrs['ttl'] : (int)$g['ttl'];
+    $json_url = $attrs['json_url'] ?? $g['json_url'];
+    $mode     = $attrs['mode'] ?? 'bar';
+
+    if ($id === '' && $json_url === '') {
+      return htbp_error_box('HTB: missing user id or JSON URL.');
+    }
+    $data = htbp_get_profile($id, $ttl, $json_url);
+    if (is_wp_error($data)) return htbp_error_box($data->get_error_message());
+    $p = isset($data['progress']) ? max(0, min(100, (int)$data['progress'])) : 0;
+
+    // NUMBER
+    if ($mode === 'number') {
+      $prefix = $attrs['numPrefix'] ?? '';
+      $suffix = $attrs['numSuffix'] ?? '%';
+      $size   = (int)($attrs['numSize'] ?? 32);
+      $color  = $attrs['numColor'] ?? '#cde5db';
+      $style  = 'font-weight:700;display:inline-block;color:'.esc_attr($color).';font-size:'.esc_attr($size).'px;';
+      return '<div class="htb-progress htb-progress--number" style="'.$style.'">'
+           . esc_html($prefix.$p.$suffix) . '</div>';
+    }
+
+    // BAR
+    if ($mode === 'bar') {
+      $bar   = $attrs['barColor'] ?? '#1aa36b';
+      $track = $attrs['trackColor'] ?? '#10251e';
+      $h     = (int)($attrs['barHeight'] ?? 10);
+      $r     = (int)($attrs['barRadius'] ?? 999);
+      $outer = 'background:'.esc_attr($track).';border-radius:'.$r.'px;overflow:hidden;height:'.$h.'px;width:100%;';
+      $inner = 'background:'.esc_attr($bar).';height:100%;width:'.$p.'%;';
+      return '<div class="htb-progress htb-progress--bar" style="'.$outer.'"><div style="'.$inner.'"></div></div>';
+    }
+
+    // CIRCLE (SVG)
+    $size   = (int)($attrs['circleSize'] ?? 120);
+    $stroke = (int)($attrs['circleStroke'] ?? 10);
+    $bar    = $attrs['circleBar'] ?? '#1aa36b';
+    $track  = $attrs['circleTrack'] ?? '#10251e';
+    $textC  = $attrs['circleText'] ?? '#cde5db';
+
+    $r = ($size - $stroke) / 2;             // radius
+    $cx = $cy = $size / 2;
+    $circ = 2 * M_PI * $r;
+    $dash = ($p / 100) * $circ;
+    $gap  = $circ - $dash;
+
+    $svg  = '<svg width="'.esc_attr($size).'" height="'.esc_attr($size).'" viewBox="0 0 '.$size.' '.$size.'">';
+    $svg .= '<circle cx="'.$cx.'" cy="'.$cy.'" r="'.$r.'" stroke="'.esc_attr($track).'" stroke-width="'.$stroke.'" fill="none" />';
+    $svg .= '<circle cx="'.$cx.'" cy="'.$cy.'" r="'.$r.'" stroke="'.esc_attr($bar).'" stroke-width="'.$stroke.'" fill="none" '
+          . 'stroke-dasharray="'.$dash.' '.$gap.'" transform="rotate(-90 '.$cx.' '.$cy.')" stroke-linecap="round" />';
+    $svg .= '<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" '
+          . 'fill="'.esc_attr($textC).'" style="font-weight:700;font-size:'.floor($size/4).'px">'.$p.'%</text>';
+    $svg .= '</svg>';
+
+    return '<div class="htb-progress htb-progress--circle" style="display:inline-block;line-height:0">'.$svg.'</div>';
+  },
+  'title'    => 'HTB: Progress',
+  'category' => 'htbpc',
+  'icon'     => 'performance',
+  'supports' => ['html' => false],
+]);
 
 // 5) Profile Field (single datum with dropdown)
 register_block_type('htb/profile-field', [

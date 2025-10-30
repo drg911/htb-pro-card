@@ -3,7 +3,7 @@
   const { registerBlockType } = wp.blocks;
   const { __ } = wp.i18n || { __: (s) => s };
   const be = wp.blockEditor || wp.editor;
-  const { InspectorControls, useBlockProps } = be;
+  const { InspectorControls, InspectorAdvancedControls } = be;
   const {
     PanelBody,
     TextControl,
@@ -13,59 +13,42 @@
     __experimentalNumberControl: NumberControl,
   } = wp.components;
 
+  const ServerSideRender = wp.serverSideRender;
   const CATEGORY = 'htbpc';
 
-  const previewWrap = (title, lines) =>
+  // --- Source controls (now under Advanced) ---
+  const AdvancedSourcePanel = ({ attrs, setAttrs }) =>
     wp.element.createElement(
-      'div',
-      useBlockProps({
-        style: {
-          border: '1px dashed #335',
-          background: '#0f1a14',
-          color: '#cde5db',
-          borderRadius: 8,
-          padding: 12,
-        },
-      }),
-      wp.element.createElement('strong', null, title),
-      ...lines.map((t) =>
-        wp.element.createElement(
-          'div',
-          { style: { marginTop: 6, opacity: 0.9 } },
-          t
-        )
+      InspectorAdvancedControls,
+      {},
+      wp.element.createElement(
+        PanelBody,
+        { title: __('Source', 'htb-pro-card'), initialOpen: true },
+        wp.element.createElement(TextControl, {
+          label: __('HTB User ID (blank = global setting)', 'htb-pro-card'),
+          value: attrs.id || '',
+          onChange: (v) => setAttrs({ id: v }),
+          placeholder: __('e.g., 2651542 or leave blank', 'htb-pro-card'),
+        }),
+        wp.element.createElement(NumberControl, {
+          label: __('Cache TTL (seconds)', 'htb-pro-card'),
+          value: attrs.ttl ?? 43200,
+          min: 60,
+          step: 60,
+          onChange: (v) => setAttrs({ ttl: Number(v || 0) }),
+        }),
+        wp.element.createElement(TextControl, {
+          label: __('JSON URL (optional)', 'htb-pro-card'),
+          value: attrs.json_url || '',
+          onChange: (v) => setAttrs({ json_url: v }),
+          placeholder: __('If set, data is read from this JSON', 'htb-pro-card'),
+        })
       )
     );
 
-  // Shared inspector section for id/ttl/json
-  const SourceSettings = ({ attrs, setAttrs }) =>
-    wp.element.createElement(
-      PanelBody,
-      { title: __('Source', 'htb-pro-card'), initialOpen: true },
-      wp.element.createElement(TextControl, {
-        label: __('HTB User ID (blank = global setting)', 'htb-pro-card'),
-        value: attrs.id || '',
-        onChange: (v) => setAttrs({ id: v }),
-        placeholder: __('e.g., 2651542 or leave blank', 'htb-pro-card'),
-      }),
-      wp.element.createElement(NumberControl, {
-        label: __('Cache TTL (seconds)', 'htb-pro-card'),
-        value: attrs.ttl ?? 43200,
-        min: 60,
-        step: 60,
-        onChange: (v) => setAttrs({ ttl: Number(v || 0) }),
-      }),
-      wp.element.createElement(TextControl, {
-        label: __('JSON URL (optional)', 'htb-pro-card'),
-        value: attrs.json_url || '',
-        onChange: (v) => setAttrs({ json_url: v }),
-        placeholder: __('If set, data is read from this JSON', 'htb-pro-card'),
-      })
-    );
-
-  /* ──────────────────────────────────────────────────────────
-     1) HTB: Profile Card
-  ────────────────────────────────────────────────────────── */
+  /* ─────────────────────────────────────────────
+     HTB: Profile Card
+  ───────────────────────────────────────────── */
   registerBlockType('htb/pro-card', {
     apiVersion: 2,
     title: 'HTB: Profile Card',
@@ -81,10 +64,9 @@
       wp.element.createElement(
         InspectorControls,
         {},
-        SourceSettings({ attrs: attributes, setAttrs: setAttributes }),
         wp.element.createElement(
           PanelBody,
-          { title: __('Display', 'htb-pro-card'), initialOpen: false },
+          { title: __('Display', 'htb-pro-card'), initialOpen: true },
           wp.element.createElement(ToggleControl, {
             label: __('Show official badge', 'htb-pro-card'),
             checked: !!attributes.badge,
@@ -92,18 +74,18 @@
           })
         )
       ),
-      previewWrap('HTB: Profile Card', [
-        attributes.id ? `User ID: ${attributes.id}` : 'Using plugin defaults',
-        attributes.badge ? 'Badge: on' : 'Badge: off',
-        'Server-rendered on front end',
-      ]),
+      AdvancedSourcePanel({ attrs: attributes, setAttrs: setAttributes }),
+      wp.element.createElement(ServerSideRender, {
+        block: 'htb/pro-card',
+        attributes: attributes,
+      }),
     ],
     save: () => null,
   });
 
-  /* ──────────────────────────────────────────────────────────
-     2) HTB: Badge
-  ────────────────────────────────────────────────────────── */
+  /* ─────────────────────────────────────────────
+     HTB: Badge
+  ───────────────────────────────────────────── */
   registerBlockType('htb/badge', {
     apiVersion: 2,
     title: 'HTB: Badge',
@@ -140,17 +122,18 @@
           })
         )
       ),
-      previewWrap('HTB: Badge', [
-        attributes.id ? `User ID: ${attributes.id}` : 'Using plugin default',
-        `Size: ${attributes.size}px`,
-      ]),
+      AdvancedSourcePanel({ attrs: attributes, setAttrs: setAttributes }),
+      wp.element.createElement(ServerSideRender, {
+        block: 'htb/badge',
+        attributes: attributes,
+      }),
     ],
     save: () => null,
   });
 
-  /* ──────────────────────────────────────────────────────────
-     3) HTB: Rank Chip
-  ────────────────────────────────────────────────────────── */
+  /* ─────────────────────────────────────────────
+     HTB: Rank Chip
+  ───────────────────────────────────────────── */
   registerBlockType('htb/rank-chip', {
     apiVersion: 2,
     title: 'HTB: Rank Chip',
@@ -167,10 +150,9 @@
       wp.element.createElement(
         InspectorControls,
         {},
-        SourceSettings({ attrs: attributes, setAttrs: setAttributes }),
         wp.element.createElement(
           PanelBody,
-          { title: __('Chip Colors', 'htb-pro-card'), initialOpen: false },
+          { title: __('Chip Colors', 'htb-pro-card'), initialOpen: true },
           wp.element.createElement('div', { style: { marginBottom: 8 } }, 'Background'),
           wp.element.createElement(ColorPalette, {
             value: attributes.bg,
@@ -183,17 +165,18 @@
           })
         )
       ),
-      previewWrap('HTB: Rank Chip', [
-        attributes.id ? `User ID: ${attributes.id}` : 'Using plugin default',
-        'Colors configurable in inspector',
-      ]),
+      AdvancedSourcePanel({ attrs: attributes, setAttrs: setAttributes }),
+      wp.element.createElement(ServerSideRender, {
+        block: 'htb/rank-chip',
+        attributes: attributes,
+      }),
     ],
     save: () => null,
   });
 
-  /* ──────────────────────────────────────────────────────────
-     4) HTB: Progress
-  ────────────────────────────────────────────────────────── */
+  /* ─────────────────────────────────────────────
+     HTB: Progress (number | bar | circle)
+  ───────────────────────────────────────────── */
   registerBlockType('htb/progress', {
     apiVersion: 2,
     title: 'HTB: Progress',
@@ -203,40 +186,161 @@
       id: { type: 'string' },
       ttl: { type: 'number', default: 43200 },
       json_url: { type: 'string' },
-      bar: { type: 'string', default: '#1aa36b' },
-      track: { type: 'string', default: '#10251e' },
+
+      // shared
+      mode: { type: 'string', default: 'bar' }, // 'number' | 'bar' | 'circle'
+
+      // number
+      numPrefix: { type: 'string', default: '' },
+      numSuffix: { type: 'string', default: '%' },
+      numSize: { type: 'number', default: 32 },
+      numColor: { type: 'string', default: '#cde5db' },
+
+      // bar
+      barColor: { type: 'string', default: '#1aa36b' },
+      trackColor: { type: 'string', default: '#10251e' },
+      barHeight: { type: 'number', default: 10 },
+      barRadius: { type: 'number', default: 999 },
+
+      // circle
+      circleSize: { type: 'number', default: 120 }, // px (SVG viewBox size)
+      circleStroke: { type: 'number', default: 10 },
+      circleBar: { type: 'string', default: '#1aa36b' },
+      circleTrack: { type: 'string', default: '#10251e' },
+      circleText: { type: 'string', default: '#cde5db' },
     },
     edit: ({ attributes, setAttributes }) => [
+      // GENERAL (appearance)
       wp.element.createElement(
         InspectorControls,
         {},
-        SourceSettings({ attrs: attributes, setAttrs: setAttributes }),
         wp.element.createElement(
           PanelBody,
-          { title: __('Bar Colors', 'htb-pro-card'), initialOpen: false },
-          wp.element.createElement('div', { style: { marginBottom: 8 } }, 'Bar'),
-          wp.element.createElement(ColorPalette, {
-            value: attributes.bar,
-            onChange: (v) => setAttributes({ bar: v }),
+          { title: __('Display', 'htb-pro-card'), initialOpen: true },
+          wp.element.createElement(SelectControl, {
+            label: __('Mode', 'htb-pro-card'),
+            value: attributes.mode,
+            options: [
+              { label: 'Bar', value: 'bar' },
+              { label: 'Number', value: 'number' },
+              { label: 'Circle', value: 'circle' },
+            ],
+            onChange: (v) => setAttributes({ mode: v }),
           }),
-          wp.element.createElement('div', { style: { marginTop: 12, marginBottom: 8 } }, 'Track'),
-          wp.element.createElement(ColorPalette, {
-            value: attributes.track,
-            onChange: (v) => setAttributes({ track: v }),
-          })
+
+          // NUMBER options
+          attributes.mode === 'number' &&
+            wp.element.createElement(TextControl, {
+              label: __('Prefix', 'htb-pro-card'),
+              value: attributes.numPrefix,
+              onChange: (v) => setAttributes({ numPrefix: v }),
+            }),
+          attributes.mode === 'number' &&
+            wp.element.createElement(TextControl, {
+              label: __('Suffix', 'htb-pro-card'),
+              value: attributes.numSuffix,
+              onChange: (v) => setAttributes({ numSuffix: v }),
+            }),
+          attributes.mode === 'number' &&
+            wp.element.createElement(NumberControl, {
+              label: __('Font size (px)', 'htb-pro-card'),
+              value: attributes.numSize,
+              min: 12,
+              step: 2,
+              onChange: (v) => setAttributes({ numSize: Number(v || 0) }),
+            }),
+          attributes.mode === 'number' &&
+            wp.element.createElement(ColorPalette, {
+              value: attributes.numColor,
+              onChange: (v) => setAttributes({ numColor: v }),
+            }),
+
+          // BAR options
+          attributes.mode === 'bar' &&
+            wp.element.createElement('div', { style: { marginTop: 12 } }, __('Bar Color', 'htb-pro-card')),
+          attributes.mode === 'bar' &&
+            wp.element.createElement(ColorPalette, {
+              value: attributes.barColor,
+              onChange: (v) => setAttributes({ barColor: v }),
+            }),
+          attributes.mode === 'bar' &&
+            wp.element.createElement('div', { style: { marginTop: 12 } }, __('Track Color', 'htb-pro-card')),
+          attributes.mode === 'bar' &&
+            wp.element.createElement(ColorPalette, {
+              value: attributes.trackColor,
+              onChange: (v) => setAttributes({ trackColor: v }),
+            }),
+          attributes.mode === 'bar' &&
+            wp.element.createElement(NumberControl, {
+              label: __('Height (px)', 'htb-pro-card'),
+              value: attributes.barHeight,
+              min: 4,
+              step: 1,
+              onChange: (v) => setAttributes({ barHeight: Number(v || 0) }),
+            }),
+          attributes.mode === 'bar' &&
+            wp.element.createElement(NumberControl, {
+              label: __('Border radius (px)', 'htb-pro-card'),
+              value: attributes.barRadius,
+              min: 0,
+              step: 1,
+              onChange: (v) => setAttributes({ barRadius: Number(v || 0) }),
+            }),
+
+          // CIRCLE options
+          attributes.mode === 'circle' &&
+            wp.element.createElement(NumberControl, {
+              label: __('Size (px)', 'htb-pro-card'),
+              value: attributes.circleSize,
+              min: 60,
+              step: 4,
+              onChange: (v) => setAttributes({ circleSize: Number(v || 0) }),
+            }),
+          attributes.mode === 'circle' &&
+            wp.element.createElement(NumberControl, {
+              label: __('Stroke width (px)', 'htb-pro-card'),
+              value: attributes.circleStroke,
+              min: 4,
+              step: 1,
+              onChange: (v) => setAttributes({ circleStroke: Number(v || 0) }),
+            }),
+          attributes.mode === 'circle' &&
+            wp.element.createElement('div', { style: { marginTop: 12 } }, __('Bar Color', 'htb-pro-card')),
+          attributes.mode === 'circle' &&
+            wp.element.createElement(ColorPalette, {
+              value: attributes.circleBar,
+              onChange: (v) => setAttributes({ circleBar: v }),
+            }),
+          attributes.mode === 'circle' &&
+            wp.element.createElement('div', { style: { marginTop: 12 } }, __('Track Color', 'htb-pro-card')),
+          attributes.mode === 'circle' &&
+            wp.element.createElement(ColorPalette, {
+              value: attributes.circleTrack,
+              onChange: (v) => setAttributes({ circleTrack: v }),
+            }),
+          attributes.mode === 'circle' &&
+            wp.element.createElement('div', { style: { marginTop: 12 } }, __('Text Color', 'htb-pro-card')),
+          attributes.mode === 'circle' &&
+            wp.element.createElement(ColorPalette, {
+              value: attributes.circleText,
+              onChange: (v) => setAttributes({ circleText: v }),
+            })
         )
       ),
-      previewWrap('HTB: Progress', [
-        attributes.id ? `User ID: ${attributes.id}` : 'Using plugin default',
-        'Server-rendered on front end',
-      ]),
+      // ADVANCED ➜ Source
+      AdvancedSourcePanel({ attrs: attributes, setAttrs: setAttributes }),
+      // Live server render
+      wp.element.createElement(ServerSideRender, {
+        block: 'htb/progress',
+        attributes: attributes,
+      }),
     ],
     save: () => null,
   });
 
-  /* ──────────────────────────────────────────────────────────
-     5) HTB: Profile Field (dropdown for a single datum)
-  ────────────────────────────────────────────────────────── */
+  /* ─────────────────────────────────────────────
+     HTB: Profile Field (unchanged except Source → Advanced)
+  ───────────────────────────────────────────── */
   const FIELD_OPTIONS = [
     { label: 'Name', value: 'name' },
     { label: 'Rank', value: 'rank' },
@@ -272,14 +376,10 @@
     },
     edit: ({ attributes, setAttributes }) => {
       const isAvatar = attributes.field === 'avatar';
-
       return [
         wp.element.createElement(
           InspectorControls,
           {},
-          // Data source
-          SourceSettings({ attrs: attributes, setAttrs: setAttributes }),
-          // Field + presentation
           wp.element.createElement(
             PanelBody,
             { title: __('Field & Presentation', 'htb-pro-card'), initialOpen: true },
@@ -340,16 +440,11 @@
               })
           )
         ),
-        previewWrap('HTB: Profile Field', [
-          `Field: ${attributes.field}`,
-          attributes.id ? `User ID: ${attributes.id}` : 'Using plugin default',
-          isAvatar
-            ? `Avatar size: ${attributes.size}px`
-            : attributes.pill
-            ? 'Style: pill'
-            : 'Style: text',
-          'Server-rendered on front end',
-        ]),
+        AdvancedSourcePanel({ attrs: attributes, setAttrs: setAttributes }),
+        wp.element.createElement(ServerSideRender, {
+          block: 'htb/profile-field',
+          attributes: attributes,
+        }),
       ];
     },
     save: () => null,
