@@ -1,329 +1,524 @@
 <?php
 /**
- * Plugin Name: HTB Pro Card (Server-side + Cache)
- * Description: Renders a rich Hack The Box profile card using the API. Shortcode: [htb_pro_card id="2651542" ttl="43200" badge="1"]
- * Version: 1.0
+ * Plugin Name: HTB Pro Card
+ * Description: Display a Hack The Box profile card (labs API or local JSON relay). Shortcode + Gutenberg blocks + settings.
+ * Version: 1.0.1
  */
 
 if (!defined('ABSPATH')) exit;
 
-function htb_api_fetch($user_id, $token = '', $timeout = 15) {
-  if (!$user_id) return new WP_Error('htb_no_id','No user id.');
-  if (!$token && defined('HTB_API_TOKEN')) $token = HTB_API_TOKEN;
-  if (!$token)   return new WP_Error('htb_no_token','No API token.');
+/* -----------------------------
+   Options helpers
+------------------------------*/
+const HTBP_OPTIONS_KEY = 'htbp_options';
 
-  $api_url = "https://app.hackthebox.com/api/v4/profile/{$user_id}";
-
-  $headers = [
-    'Authorization'    => 'Bearer '.$token,
-    'Accept'           => 'application/json',
-    'User-Agent'       => 'WP-HTB-ProCard/1.0',
-    'X-Requested-With' => 'XMLHttpRequest',
-    'Referer'          => "https://app.hackthebox.com/profile/{$user_id}",
-    'Origin'           => 'https://app.hackthebox.com',
+function htbp_default_options() {
+  return [
+    'id'       => '',
+    'ttl'      => 43200,
+    'badge'    => 1,
+    'json_url' => '',
   ];
+}
+function htbp_get_options() {
+  $saved = get_option(HTBP_OPTIONS_KEY, []);
+  return wp_parse_args($saved, htbp_default_options());
+}
 
-  $resp = wp_remote_get($api_url, [ 'timeout' => $timeout, 'headers' => $headers ]);
+/** Resolve user id from attrs or global settings; accept full profile URL */
+function htbp_resolve_id($maybe_id = '') {
+  $id = trim((string)$maybe_id);
+  if ($id === '') $id = (string) htbp_get_options()['id'];
+  if ($id && preg_match('~^https?://[^/]+/profile/(\d+)~i', $id, $m)) $id = $m[1];
+  return $id !== '' ? $id : '';
+}
+
+/** small error box */
+function htbp_error_box($msg) {
+  return '<div class="htb-card" style="padding:10px;border-radius:8px;background:#101815;color:#f66;border:1px solid #3a1212;">'
+       . esc_html($msg) . '</div>';
+}
+
+/* -----------------------------
+   Fetchers + cache
+------------------------------*/
+function htbp_transient_key($user_id){ return 'htb_v4_'.$user_id; }
+
+function htbp_fetch_labs_api($user_id, $timeout = 15) {
+  if (!$user_id) return new WP_Error('htb_no_id','No user id.');
+  $token = defined('HTB_API_TOKEN') ? HTB_API_TOKEN : '';
+  if (!$token) return new WP_Error('htb_no_token','Define HTB_API_TOKEN in wp-config.php to use labs API.');
+
+  $url = "https://labs.hackthebox.com/api/v4/user/profile/basic/{$user_id}";
+  $resp = wp_remote_get($url, [
+    'timeout' => $timeout,
+    'headers' => [
+      'Authorization' => 'Bearer '.$token,
+      'Accept'        => 'application/json',
+      'User-Agent'    => 'WP-HTB-ProCard/1.0',
+    ],
+  ]);
   if (is_wp_error($resp)) return $resp;
-
   $code = wp_remote_retrieve_response_code($resp);
   $body = wp_remote_retrieve_body($resp);
-  if ($code !== 200 || !$body) return new WP_Error('htb_http', 'HTTP '.$code.' from API');
+  if ($code !== 200 || !$body) return new WP_Error('htb_http', 'HTTP '.$code);
 
   $json = json_decode($body, true);
-  if (!is_array($json)) return new WP_Error('htb_json', 'Invalid JSON from API');
+  if (!is_array($json)) return new WP_Error('htb_json', 'Invalid JSON');
 
-  $info = $json['info'] ?? $json;
-
+  $p = $json['profile'] ?? $json;
   return [
-    'name'       => $info['name']        ?? $info['username'] ?? 'HTB User',
-    'avatar'     => $info['avatar']      ?? '',
-    'rank'       => $info['rank']        ?? $info['ranking'] ?? '—',
-    'points'     => $info['points']      ?? $info['score']   ?? '—',
-    'user_owns'  => $info['owns']['user'] ?? ($info['user_owns'] ?? null),
-    'root_owns'  => $info['owns']['root'] ?? ($info['root_owns'] ?? null),
-    'country'    => $info['country_name'] ?? ($info['country'] ?? ''),
-    'team'       => $info['team_name']    ?? '',
+    'name'      => $p['name'] ?? $p['username'] ?? 'HTB User',
+    'avatar'    => $p['avatar'] ?? '',
+    'rank'      => $p['rank'] ?? '—',
+    'points'    => $p['points'] ?? '—',
+    'user_owns' => isset($p['user_owns'])   ? (int)$p['user_owns']   : 0,
+    'root_owns' => isset($p['system_owns']) ? (int)$p['system_owns'] : 0,
+    'next_rank' => $p['next_rank'] ?? '',
+    'progress'  => isset($p['current_rank_progress']) ? (int)$p['current_rank_progress'] : null,
+    'country'   => $p['country'] ?? $p['country_name'] ?? '',
+    'team'      => $p['team'] ?? $p['team_name'] ?? '',
   ];
 }
 
-function htb_api_get_cached($user_id, $ttl = 43200, $token = '') {
-  $key = 'htb_v4_'.$user_id;
-  if ($cached = get_transient($key)) return $cached;
+function htbp_fetch_json_url($json_url, $timeout = 10) {
+  $resp = wp_remote_get($json_url, ['timeout'=>$timeout,'headers'=>['Accept'=>'application/json']]);
+  if (is_wp_error($resp)) return $resp;
+  $body = wp_remote_retrieve_body($resp);
+  $json = json_decode($body, true);
+  if (!is_array($json)) return new WP_Error('htb_json', 'Invalid JSON at '.$json_url);
+  return $json;
+}
 
-  $fresh = htb_api_fetch($user_id, $token);
-  if (!is_wp_error($fresh)) {
-    set_transient($key, $fresh, max(300, (int)$ttl));
-    update_option($key.'_fallback', $fresh, false);
-    return $fresh;
-  }
-  if ($fallback = get_option($key.'_fallback')) return $fallback;
-  return $fresh;
+function htbp_get_profile($id, $ttl, $json_url='') {
+  if ($json_url) return htbp_fetch_json_url($json_url);
+  $key = htbp_transient_key($id);
+  $cached = get_transient($key);
+  if ($cached) return $cached;
+  $data = htbp_fetch_labs_api($id);
+  if (!is_wp_error($data)) set_transient($key, $data, max(60,(int)$ttl));
+  return $data;
+}
+function htbp_clear_cache($id) { if ($id) delete_transient(htbp_transient_key($id)); }
+
+/* -----------------------------
+   Renderer + shortcode
+------------------------------*/
+function htbp_render_card($data, $show_badge, $id) {
+  if (is_wp_error($data)) return htbp_error_box($data->get_error_message());
+  $profile_url = 'https://app.hackthebox.com/profile/'.rawurlencode($id);
+  $badge_url   = 'https://www.hackthebox.com/badge/image/'.rawurlencode($id);
+
+  ob_start(); ?>
+  <div class="htb-card" style="display:flex;align-items:center;gap:16px;background:#0e1714;border:1px solid #123; border-radius:12px; padding:16px; color:#cde5db;">
+    <div style="flex:1 1 auto; min-width:0;">
+      <div style="font-weight:700; font-size:18px; line-height:1.2; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+        <?php echo esc_html($data['name'] ?? 'HTB User'); ?>
+      </div>
+      <div style="margin-top:6px; display:flex; flex-wrap:wrap; gap:8px; font-size:12px;">
+        <span style="background:#0f2a22;padding:4px 8px;border-radius:999px;border:1px solid #1f3a32;">Rank: <?php echo esc_html($data['rank'] ?? '—'); ?></span>
+        <span style="background:#0f2a22;padding:4px 8px;border-radius:999px;border:1px solid #1f3a32;">Points: <?php echo esc_html($data['points'] ?? '—'); ?></span>
+        <span style="background:#0f2a22;padding:4px 8px;border-radius:999px;border:1px solid #1f3a32;">Owns: <?php echo (int)($data['user_owns'] ?? 0); ?> user • <?php echo (int)($data['root_owns'] ?? 0); ?> root</span>
+        <?php if (!empty($data['next_rank'])): ?>
+          <span style="background:#0f2a22;padding:4px 8px;border-radius:999px;border:1px solid #1f3a32;">Next: <?php echo esc_html($data['next_rank']); ?></span>
+        <?php endif; ?>
+        <?php if (isset($data['progress'])): ?>
+          <span style="background:#0f2a22;padding:4px 8px;border-radius:999px;border:1px solid #1f3a32;">Progress: <?php echo (int)$data['progress']; ?>%</span>
+        <?php endif; ?>
+      </div>
+      <div style="margin-top:10px;">
+        <a href="<?php echo esc_url($profile_url); ?>" target="_blank" rel="noopener" style="display:inline-block;background:#115a46;border:1px solid #1f7a62;color:#eafff6;text-decoration:none;padding:6px 10px;border-radius:8px;">View Profile</a>
+      </div>
+    </div>
+    <?php if ($show_badge): ?>
+      <div style="flex:0 0 auto;">
+        <img src="<?php echo esc_url($badge_url); ?>" alt="HTB badge" style="display:block;max-height:64px;border-radius:8px;">
+      </div>
+    <?php endif; ?>
+  </div>
+  <?php
+  return ob_get_clean();
 }
 
 function htb_pro_card_shortcode($atts){
-  $global = htbp_get_options();
-
+  $g = htbp_get_options();
   $a = shortcode_atts([
     'id'       => '',
     'ttl'      => '',
     'badge'    => '',
-    'token'    => '',
-    'json_url' => ''
+    'json_url' => '',
   ], $atts, 'htb_pro_card');
 
-  // Use plugin-wide defaults when not provided
-  $id       = $a['id']       !== '' ? $a['id']       : $global['id'];
-  $ttl      = $a['ttl']      !== '' ? intval($a['ttl']) : intval($global['ttl']);
-  $badge    = $a['badge']    !== '' ? ( $a['badge'] ? '1' : '0' ) : ( $global['badge'] ? '1' : '0' );
-  $json_url = $a['json_url'] !== '' ? $a['json_url'] : $global['json_url'];
+  $id       = htbp_resolve_id(($a['id'] !== '') ? $a['id'] : '');
+  $ttl      = ($a['ttl'] !== '') ? (int)$a['ttl'] : (int)$g['ttl'];
+  $badge    = ($a['badge'] !== '') ? (bool)$a['badge'] : (bool)$g['badge'];
+  $json_url = ($a['json_url'] !== '') ? $a['json_url'] : $g['json_url'];
 
-  if (!$id && !$json_url) return '<div>HTB: missing user id (or JSON URL).</div>';
-
-  $profile_url = 'https://app.hackthebox.com/profile/'.rawurlencode($id);
-  $badge_url   = 'https://www.hackthebox.com/badge/image/'.rawurlencode($id);
-
-  // Choose source
-  if ( ! empty($json_url) ) {
-    $data = htb_fetch_from_json_url( esc_url_raw($json_url) );
-  } else {
-    $data = htb_api_get_cached( sanitize_text_field($id), (int)$ttl, $a['token'] );
+  if ($id === '' && $json_url === '') {
+    return htbp_error_box('HTB: missing user id (or JSON URL). Set a global ID in Settings → HTB Pro Card, or fill the block/shortcode attributes.');
   }
-
-  // ... (renderer stays the same, but use $badge to decide if badge shows)
-  // replace: if ($a['badge'] === '1') with:
-  //          if ($badge === '1') { ... }
-
-
-/**
- * ==============
- * Gutenberg Block
- * ==============
- */
-function htbp_register_block() {
-  // Editor script (no build step)
-  wp_register_script(
-    'htb-pro-card-block',
-    plugins_url( 'block.js', __FILE__ ),
-    array( 'wp-blocks', 'wp-element', 'wp-components', 'wp-block-editor', 'wp-i18n' ),
-    '1.0',
-    true
-  );
-
-  // Dynamic block (server-rendered)
-  register_block_type( 'htb/pro-card', array(
-    'api_version'     => 2,
-    'editor_script'   => 'htb-pro-card-block',
-    'render_callback' => function( $attrs, $content ) {
-      $id       = isset($attrs['id'])       ? sanitize_text_field($attrs['id']) : '';
-      $ttl      = isset($attrs['ttl'])      ? intval($attrs['ttl'])              : 43200;
-      $badge    = isset($attrs['badge'])    ? ( $attrs['badge'] ? '1' : '0' )    : '1';
-      $json_url = isset($attrs['json_url']) ? esc_url_raw($attrs['json_url'])    : '';
-
-      $shortcode = '[htb_pro_card'
-                 . ( $id ? ' id="'. esc_attr($id) .'"' : '' )
-                 . ' ttl="'. esc_attr($ttl) .'"'
-                 . ' badge="'. esc_attr($badge) .'"'
-                 . ( $json_url ? ' json_url="'. esc_attr($json_url) .'"' : '' )
-                 . ']';
-
-      return do_shortcode( $shortcode );
-    },
-    'attributes' => array(
-      'id'       => array( 'type' => 'string',  'default' => '' ),
-      'ttl'      => array( 'type' => 'number',  'default' => 43200 ),
-      'badge'    => array( 'type' => 'boolean', 'default' => true ),
-      'json_url' => array( 'type' => 'string',  'default' => '' ),
-    ),
-    'title'       => __( 'HTB Pro Card', 'htb-pro-card' ),
-    'description' => __( 'Displays a Hack The Box profile card.', 'htb-pro-card' ),
-    'category'    => 'widgets',
-    'icon'        => 'shield',
-    'supports'    => array( 'html' => false ),
-  ) );
+  $data = htbp_get_profile($id, $ttl, $json_url);
+  return htbp_render_card($data, $badge, $id ?: '0');
 }
-add_action( 'init', 'htbp_register_block' );
-
 add_shortcode('htb_pro_card','htb_pro_card_shortcode');
 
-/**
- * =====================================
- * Global settings for HTB Pro Card
- * =====================================
- */
+/* -----------------------------
+   Gutenberg blocks (server-rendered)
+------------------------------*/
+add_action('init', function () {
+  $deps = ['wp-blocks','wp-element','wp-components','wp-block-editor','wp-i18n'];
+  $ver  = file_exists(__DIR__.'/block.js') ? filemtime(__DIR__.'/block.js') : '1.0';
+  wp_register_script('htb-pro-card-blocks', plugins_url('block.js', __FILE__), $deps, $ver, true);
 
-define( 'HTBP_OPTIONS_KEY', 'htbp_options' );
+  // helper wrapper
+  $wrap = function($html, $class=''){ $class = $class ? ' class="'.esc_attr($class).'"' : ''; return '<div'.$class.'>'.$html.'</div>'; };
 
-function htbp_default_options() {
-  return array(
-    'id'       => '',        // e.g., 2651542
-    'ttl'      => 43200,     // 12h
-    'badge'    => 1,         // 1 = show
-    'json_url' => '',        // optional
-  );
-}
+  // 1) Full profile card
+  register_block_type('htb/pro-card', [
+    'api_version'     => 2,
+    'editor_script'   => 'htb-pro-card-blocks',
+    'render_callback' => function ($attrs) {
+      $g = htbp_get_options();
+      $id       = htbp_resolve_id($attrs['id'] ?? '');
+      $ttl      = isset($attrs['ttl']) ? (int)$attrs['ttl'] : (int)$g['ttl'];
+      $badge    = array_key_exists('badge',$attrs) ? (bool)$attrs['badge'] : (bool)$g['badge'];
+      $json_url = $attrs['json_url'] ?? $g['json_url'];
 
-function htbp_get_options() {
-  $saved = get_option( HTBP_OPTIONS_KEY, array() );
-  return wp_parse_args( $saved, htbp_default_options() );
-}
+      if ($id === '' && $json_url === '') return htbp_error_box('HTB: missing user id or JSON URL. Set a global ID in Settings → HTB Pro Card, or fill the block settings.');
+      $data = htbp_get_profile($id, $ttl, $json_url);
+      return htbp_render_card($data, $badge, $id ?: '0');
+    },
+    'attributes' => [
+      'id'       => ['type'=>'string','default'=>''],
+      'ttl'      => ['type'=>'number','default'=>43200],
+      'badge'    => ['type'=>'boolean','default'=>true],
+      'json_url' => ['type'=>'string','default'=>''],
+      'className'=> ['type'=>'string','default'=>'']
+    ],
+    'title'       => 'HTB: Profile Card',
+    'category'    => 'htbpc',
+    'icon'        => 'shield',
+    'supports'    => ['html'=>false],
+  ]);
 
-function htbp_get_opt( $key, $fallback = null ) {
-  $opts = htbp_get_options();
-  return isset( $opts[ $key ] ) ? $opts[ $key ] : $fallback;
-}
+  // 2) Badge
+  register_block_type('htb/badge', [
+    'api_version'   => 2,
+    'editor_script' => 'htb-pro-card-blocks',
+    'render_callback' => function ($attrs) use ($wrap) {
+      $id    = htbp_resolve_id($attrs['id'] ?? '');
+      $size  = max(24, (int)($attrs['size'] ?? 64));
+      $round = !empty($attrs['rounded']);
+      if ($id === '') return htbp_error_box('HTB: missing user id. Set a global ID in Settings → HTB Pro Card, or fill the block settings.');
+      $src   = 'https://www.hackthebox.com/badge/image/'.rawurlencode($id);
+      $style = 'max-height:'.$size.'px;'.($round ? 'border-radius:8px;' : '');
+      $html  = '<img src="'.esc_url($src).'" alt="HTB badge" style="'.esc_attr($style).'">';
+      return $wrap($html, $attrs['className'] ?? '');
+    },
+    'attributes' => [
+      'id'        => ['type'=>'string','default'=>''],
+      'size'      => ['type'=>'number','default'=>64],
+      'rounded'   => ['type'=>'boolean','default'=>true],
+      'className' => ['type'=>'string','default'=>'']
+    ],
+    'title'    => 'HTB: Badge',
+    'category' => 'htbpc',
+    'icon'     => 'format-image',
+    'supports' => ['html'=>false],
+  ]);
 
-/* Admin settings page */
-add_action( 'admin_menu', function() {
-  add_options_page(
-    'HTB Pro Card',
-    'HTB Pro Card',
-    'manage_options',
-    'htbp-settings',
-    'htbp_render_settings_page'
-  );
+  // 3) Rank chip
+  register_block_type('htb/rank-chip', [
+    'api_version'   => 2,
+    'editor_script' => 'htb-pro-card-blocks',
+    'render_callback' => function ($attrs) use ($wrap) {
+      $g = htbp_get_options();
+      $id       = htbp_resolve_id($attrs['id'] ?? '');
+      $ttl      = isset($attrs['ttl']) ? (int)$attrs['ttl'] : (int)$g['ttl'];
+      $json_url = $attrs['json_url'] ?? $g['json_url'];
+      $bg       = $attrs['bg'] ?? '#0f2a22';
+      $fg       = $attrs['fg'] ?? '#cde5db';
+
+      if ($id === '' && $json_url === '') return htbp_error_box('HTB: missing user id or JSON URL.');
+      $data = htbp_get_profile($id, $ttl, $json_url);
+      if (is_wp_error($data)) return htbp_error_box($data->get_error_message());
+
+      $rank = $data['rank'] ?? '—';
+      $html = '<span style="display:inline-block;padding:.35em .6em;border-radius:999px;background:'.esc_attr($bg).';color:'.esc_attr($fg).';border:1px solid rgba(255,255,255,.08)">Rank: '.esc_html($rank).'</span>';
+      return $wrap($html, $attrs['className'] ?? '');
+    },
+    'attributes' => [
+      'id'        => ['type'=>'string','default'=>''],
+      'ttl'       => ['type'=>'number','default'=>43200],
+      'json_url'  => ['type'=>'string','default'=>''],
+      'bg'        => ['type'=>'string','default'=>'#0f2a22'],
+      'fg'        => ['type'=>'string','default'=>'#cde5db'],
+      'className' => ['type'=>'string','default'=>'']
+    ],
+    'title'    => 'HTB: Rank Chip',
+    'category' => 'htbpc',
+    'icon'     => 'awards',
+    'supports' => ['html'=>false],
+  ]);
+
+  // 4) Progress
+  register_block_type('htb/progress', [
+    'api_version'   => 2,
+    'editor_script' => 'htb-pro-card-blocks',
+    'render_callback' => function ($attrs) use ($wrap) {
+      $g = htbp_get_options();
+      $id       = htbp_resolve_id($attrs['id'] ?? '');
+      $ttl      = isset($attrs['ttl']) ? (int)$attrs['ttl'] : (int)$g['ttl'];
+      $json_url = $attrs['json_url'] ?? $g['json_url'];
+      $bar      = $attrs['bar'] ?? '#1aa36b';
+      $track    = $attrs['track'] ?? '#10251e';
+
+      if ($id === '' && $json_url === '') return htbp_error_box('HTB: missing user id or JSON URL.');
+      $data = htbp_get_profile($id, $ttl, $json_url);
+      if (is_wp_error($data)) return htbp_error_box($data->get_error_message());
+
+      $p = isset($data['progress']) ? max(0, min(100, (int)$data['progress'])) : 0;
+      $html = '<div style="background:'.esc_attr($track).';border-radius:999px;overflow:hidden;height:10px;width:100%;">'
+            . '<div style="background:'.esc_attr($bar).';height:100%;width:'.$p.'%;"></div></div>'
+            . '<div style="margin-top:6px;font-size:12px;opacity:.8">Progress: '.$p.'%</div>';
+      return $wrap($html, $attrs['className'] ?? '');
+    },
+    'attributes' => [
+      'id'        => ['type'=>'string','default'=>''],
+      'ttl'       => ['type'=>'number','default'=>43200],
+      'json_url'  => ['type'=>'string','default'=>''],
+      'bar'       => ['type'=>'string','default'=>'#1aa36b'],
+      'track'     => ['type'=>'string','default'=>'#10251e'],
+      'className' => ['type'=>'string','default'=>'']
+    ],
+    'title'    => 'HTB: Progress',
+    'category' => 'htbpc',
+    'icon'     => 'performance',
+    'supports' => ['html'=>false],
+  ]);
 });
 
-add_action( 'admin_init', function() {
-  register_setting( 'htbp_settings_group', HTBP_OPTIONS_KEY, array(
-    'type' => 'array',
-    'sanitize_callback' => function( $input ) {
-      $out = htbp_default_options();
-      $out['id']       = isset($input['id'])       ? sanitize_text_field( $input['id'] ) : '';
-      $out['ttl']      = isset($input['ttl'])      ? max( 60, intval($input['ttl']) )     : 43200;
-      $out['badge']    = ! empty($input['badge']) ? 1 : 0;
-      $out['json_url'] = isset($input['json_url']) ? esc_url_raw( $input['json_url'] ) : '';
-      return $out;
+// 5) Profile Field (single datum with dropdown)
+register_block_type('htb/profile-field', [
+  'api_version'   => 2,
+  'editor_script' => 'htb-pro-card-blocks',
+  'render_callback' => function ($attrs) {
+    $g = htbp_get_options();
+
+    // Resolve basics
+    $id       = htbp_resolve_id($attrs['id'] ?? '');
+    $ttl      = isset($attrs['ttl']) ? (int)$attrs['ttl'] : (int)$g['ttl'];
+    $json_url = $attrs['json_url'] ?? $g['json_url'];
+
+    // Field + presentation options
+    $field     = $attrs['field']     ?? 'rank';
+    $label     = $attrs['label']     ?? '';
+    $prefix    = $attrs['prefix']    ?? '';
+    $suffix    = $attrs['suffix']    ?? '';
+    $tag       = $attrs['tag']       ?? 'span';    // span|div|h6 etc
+    $pill      = !empty($attrs['pill']);
+    $bg        = $attrs['bg']        ?? '#0f2a22';
+    $fg        = $attrs['fg']        ?? '#cde5db';
+    $className = $attrs['className'] ?? '';
+    $size      = max(12, (int)($attrs['size'] ?? 64)); // avatar size
+
+    if ($id === '' && $json_url === '') {
+      return htbp_error_box('HTB: missing user id or JSON URL. Set a global ID in Settings → HTB Pro Card, or fill the block settings.');
     }
-  ) );
+
+    $data = htbp_get_profile($id, $ttl, $json_url);
+    if (is_wp_error($data)) return htbp_error_box($data->get_error_message());
+
+    // Map field -> value from our normalized profile array
+    // (these keys match what we build in htbp_fetch_labs_api)
+    $map = [
+      'name'        => $data['name']      ?? null,
+      'rank'        => $data['rank']      ?? null,
+      'points'      => $data['points']    ?? null,
+      'user_owns'   => $data['user_owns'] ?? null,
+      'root_owns'   => $data['root_owns'] ?? null,
+      'progress'    => $data['progress']  ?? null,
+      'next_rank'   => $data['next_rank'] ?? null,
+      'country'     => $data['country']   ?? null,
+      'team'        => $data['team']      ?? null,
+      'avatar'      => $data['avatar']    ?? null, // URL (may be empty/non-public)
+    ];
+
+    $value = $map[$field] ?? null;
+
+    // Special case: avatar image (URL)
+    if ($field === 'avatar') {
+      if (!$value) return htbp_error_box('HTB: avatar not available.');
+      $style = 'max-height:'.$size.'px;max-width:'.$size.'px;border-radius:' . ($pill ? '50%' : '8px') . ';';
+      $html  = '<img src="'.esc_url($value).'" alt="HTB avatar" style="'.esc_attr($style).'">';
+      return '<div class="'.esc_attr($className).'">'.$html.'</div>';
+    }
+
+    // Treat numbers
+    if ($field === 'progress' && $value !== null) $value = (int)$value;
+
+    // Human-friendly default
+    if ($value === null || $value === '') $value = '—';
+
+    // Build chip or plain text
+    if ($pill) {
+      $content = ($label !== '' ? esc_html($label).': ' : '')
+              . esc_html($prefix.$value.$suffix);
+      $style = 'display:inline-block;padding:.35em .6em;border-radius:999px;'
+              . 'background:'.esc_attr($bg).';color:'.esc_attr($fg).';'
+              . 'border:1px solid rgba(255,255,255,.08)';
+      $html = '<span style="'.$style.'">'.$content.'</span>';
+    } else {
+      $content = ($label !== '' ? '<strong>'.esc_html($label).': </strong>' : '')
+              . esc_html($prefix.$value.$suffix);
+      $html = '<'.$tag.'>'.$content.'</'.$tag.'>';
+    }
+
+    $class = $className ? ' class="'.esc_attr($className).'"' : '';
+    return '<div'.$class.'>'.$html.'</div>';
+  },
+  'attributes' => [
+    'id'        => ['type'=>'string','default'=>''],
+    'ttl'       => ['type'=>'number','default'=>43200],
+    'json_url'  => ['type'=>'string','default'=>''],
+
+    'field'     => ['type'=>'string','default'=>'rank'],     // dropdown
+    'label'     => ['type'=>'string','default'=>''],         // optional label shown before value
+    'prefix'    => ['type'=>'string','default'=>''],         // value prefix
+    'suffix'    => ['type'=>'string','default'=>''],         // value suffix
+    'tag'       => ['type'=>'string','default'=>'span'],     // span|div|h6...
+    'pill'      => ['type'=>'boolean','default'=>true],      // pill style chip
+    'bg'        => ['type'=>'string','default'=>'#0f2a22'],  // chip bg
+    'fg'        => ['type'=>'string','default'=>'#cde5db'],  // chip fg
+    'size'      => ['type'=>'number','default'=>64],         // for avatar only
+    'className' => ['type'=>'string','default'=>'']
+  ],
+  'title'    => 'HTB: Profile Field',
+  'category' => 'htbpc',
+  'icon'     => 'admin-settings',
+  'supports' => ['html'=>false],
+]);
+
+/* Custom block category */
+add_filter('block_categories_all', function ($categories) {
+  $categories[] = ['slug'=>'htbpc','title'=>__('HTB Pro Card','htb-pro-card'),'icon'=>null];
+  return $categories;
+}, 10, 1);
+
+/* -----------------------------
+   Settings page + Test / Clear
+------------------------------*/
+add_action('admin_menu', function(){
+  add_options_page('HTB Pro Card','HTB Pro Card','manage_options','htbp-settings','htbp_render_settings_page');
+});
+add_action('admin_init', function(){
+  register_setting('htbp_settings_group', HTBP_OPTIONS_KEY, [
+    'type'=>'array',
+    'sanitize_callback'=>function($in){
+      $o = htbp_default_options();
+      $o['id']       = isset($in['id'])       ? sanitize_text_field($in['id']) : '';
+      $o['ttl']      = isset($in['ttl'])      ? max(60,(int)$in['ttl'])         : 43200;
+      $o['badge']    = !empty($in['badge']) ? 1 : 0;
+      $o['json_url'] = isset($in['json_url']) ? esc_url_raw($in['json_url'])   : '';
+      return $o;
+    }
+  ]);
 });
 
-function htbp_render_settings_page() {
-  if ( ! current_user_can('manage_options') ) return;
-  $o = htbp_get_options();
-  ?>
+function htbp_render_settings_page(){
+  if (!current_user_can('manage_options')) return;
+  $o = htbp_get_options(); ?>
   <div class="wrap">
     <h1>HTB Pro Card – Settings</h1>
-    <p>These values are used by the Gutenberg block, widget, and shortcode <em>by default</em>. You can still override per-block if needed.</p>
-
     <form method="post" action="options.php">
-      <?php settings_fields( 'htbp_settings_group' ); ?>
+      <?php settings_fields('htbp_settings_group'); ?>
       <table class="form-table" role="presentation">
-        <tr>
-          <th scope="row"><label for="htbp_id">HTB User ID</label></th>
-          <td><input name="<?php echo HTBP_OPTIONS_KEY; ?>[id]" id="htbp_id" type="text" value="<?php echo esc_attr($o['id']); ?>" class="regular-text" placeholder="e.g., 2651542"></td>
-        </tr>
-        <tr>
-          <th scope="row"><label for="htbp_ttl">Cache TTL (seconds)</label></th>
-          <td><input name="<?php echo HTBP_OPTIONS_KEY; ?>[ttl]" id="htbp_ttl" type="number" min="60" step="60" value="<?php echo esc_attr($o['ttl']); ?>" class="small-text"> <span class="description">Default cache duration.</span></td>
-        </tr>
-        <tr>
-          <th scope="row">Show badge</th>
-          <td><label><input name="<?php echo HTBP_OPTIONS_KEY; ?>[badge]" type="checkbox" value="1" <?php checked( $o['badge'], 1 ); ?>> Display official HTB badge next to the card</label></td>
-        </tr>
-        <tr>
-          <th scope="row"><label for="htbp_json">JSON URL (optional)</label></th>
-          <td><input name="<?php echo HTBP_OPTIONS_KEY; ?>[json_url]" id="htbp_json" type="url" value="<?php echo esc_attr($o['json_url']); ?>" class="regular-text" placeholder="/wp-content/uploads/htb/htb.json">
-            <p class="description">If set, the card reads stats from this JSON (relay) instead of the API.</p>
-          </td>
-        </tr>
+        <tr><th><label for="htbp_id">HTB User ID</label></th>
+          <td><input type="text" id="htbp_id" name="<?php echo esc_attr(HTBP_OPTIONS_KEY); ?>[id]" value="<?php echo esc_attr($o['id']); ?>" class="regular-text"></td></tr>
+        <tr><th><label for="htbp_ttl">Cache TTL (seconds)</label></th>
+          <td><input type="number" id="htbp_ttl" min="60" step="60" name="<?php echo esc_attr(HTBP_OPTIONS_KEY); ?>[ttl]" value="<?php echo esc_attr($o['ttl']); ?>" class="small-text"></td></tr>
+        <tr><th>Show badge</th>
+          <td><label><input type="checkbox" name="<?php echo esc_attr(HTBP_OPTIONS_KEY); ?>[badge]" value="1" <?php checked($o['badge'],1); ?>> Display official HTB badge</label></td></tr>
+        <tr><th><label for="htbp_json">JSON URL (optional)</label></th>
+          <td><input type="url" id="htbp_json" name="<?php echo esc_attr(HTBP_OPTIONS_KEY); ?>[json_url]" value="<?php echo esc_attr($o['json_url']); ?>" class="regular-text">
+          <p class="description">If set, stats are read from this JSON instead of the labs API.</p></td></tr>
       </table>
       <?php submit_button(); ?>
     </form>
+
     <hr>
     <h2>Connection Test</h2>
-    <p>Click to fetch your profile using the current settings (JSON URL if set, otherwise the labs API).</p>
-    <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
-      <?php wp_nonce_field( 'htbp_test_nonce' ); ?>
+    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+      <?php wp_nonce_field('htbp_test_nonce'); ?>
       <input type="hidden" name="action" value="htbp_test">
-      <?php submit_button( 'Run Test', 'secondary' ); ?>
+      <?php submit_button('Run Test','secondary'); ?>
     </form>
-  </div>
-  <?php
+
+    <h2>Cache</h2>
+    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+      <?php wp_nonce_field('htbp_clear_nonce'); ?>
+      <input type="hidden" name="action" value="htbp_clear">
+      <?php submit_button('Clear Cache','delete'); ?>
+    </form>
+  </div><?php
 }
 
-/**
- * ================================
- * Admin: Test connection + notices
- * ================================
- */
-
-// Handle the "Test connection" submit (secure: nonce + capability)
-add_action( 'admin_post_htbp_test', function () {
-  if ( ! current_user_can( 'manage_options' ) ) {
-    wp_die( 'Unauthorized' );
-  }
-  check_admin_referer( 'htbp_test_nonce' );
-
-  $o = htbp_get_options();
-  $id       = $o['id'];
-  $json_url = $o['json_url'];
-
-  $result = array(
-    'ok'     => false,
-    'source' => $json_url ? 'json_url' : 'labs_api',
-    'status' => '',
-    'data'   => null,
-    'error'  => '',
-  );
-
-  if ( $json_url ) {
-    $r = htb_fetch_from_json_url( $json_url );
-    if ( is_wp_error( $r ) ) {
-      $result['error']  = $r->get_error_message();
-    } else {
-      $result['ok']   = true;
-      $result['data'] = $r;
-    }
-  } else {
-    // Use labs API via your existing fetch (requires HTB_API_TOKEN)
-    $r = htb_api_fetch( $id );
-    if ( is_wp_error( $r ) ) {
-      $result['error'] = $r->get_error_message();
-    } else {
-      $result['ok']   = true;
-      $result['data'] = $r;
-    }
-  }
-
-  // Make a readable status string
-  if ( $result['ok'] ) {
-    $result['status'] = 'OK';
-  } else {
-    $result['status'] = 'ERROR';
-  }
-
-  // Store for display and redirect back to settings
-  set_transient( 'htbp_test_result', $result, 120 );
-  wp_safe_redirect( admin_url( 'options-general.php?page=htbp-settings' ) );
-  exit;
+/* Settings link on Plugins page + meta */
+add_filter('plugin_action_links_' . plugin_basename(__FILE__), function ($links) {
+  $url = admin_url('options-general.php?page=htbp-settings');
+  array_unshift($links, '<a href="' . esc_url($url) . '">' . esc_html__('Settings', 'htb-pro-card') . '</a>');
+  return $links;
 });
+add_filter('plugin_row_meta', function ($links, $file) {
+  if ($file === plugin_basename(__FILE__)) $links[] = '<a href="https://app.hackthebox.com/profile" target="_blank" rel="noopener">DOCS</a>';
+  return $links;
+}, 10, 2);
 
-// Show the result as an admin notice on the settings page
-add_action( 'admin_notices', function () {
-  if ( ! isset( $_GET['page'] ) || $_GET['page'] !== 'htbp-settings' ) return;
-  $res = get_transient( 'htbp_test_result' );
-  if ( ! $res ) return;
-
-  delete_transient( 'htbp_test_result' );
-
-  $cls = $res['ok'] ? 'notice-success' : 'notice-error';
-  echo '<div class="notice ' . esc_attr( $cls ) . ' is-dismissible"><p><strong>HTB Test: '
-     . esc_html( $res['status'] ) . '</strong> (source: '
-     . esc_html( $res['source'] ) . ')</p>';
-
-  if ( $res['ok'] && is_array( $res['data'] ) ) {
-    // Show a compact preview of the mapped fields
-    $preview = array_intersect_key( $res['data'], array_flip( array(
-      'name','rank','points','user_owns','root_owns','next_rank','progress','country','team'
-    ) ) );
-    echo '<pre style="max-height:240px;overflow:auto;background:#111;color:#cde5db;padding:8px;border-radius:6px;">'
-       . esc_html( wp_json_encode( $preview, JSON_PRETTY_PRINT ) )
-       . '</pre>';
-  } elseif ( ! $res['ok'] ) {
-    echo '<p>' . esc_html( $res['error'] ?: 'Unknown error' ) . '</p>';
+/* Test + Clear handlers + notice */
+add_action('admin_post_htbp_test', function(){
+  if (!current_user_can('manage_options')) wp_die('Unauthorized');
+  check_admin_referer('htbp_test_nonce');
+  $o = htbp_get_options();
+  $src = $o['json_url'] ? 'json' : 'labs';
+  $id  = htbp_resolve_id('');
+  $res = $o['json_url'] ? htbp_fetch_json_url($o['json_url']) : htbp_fetch_labs_api($id);
+  $payload = is_wp_error($res) ? ['ok'=>false,'err'=>$res->get_error_message(),'src'=>$src] : ['ok'=>true,'data'=>$res,'src'=>$src];
+  set_transient('htbp_test_result',$payload,120);
+  wp_safe_redirect(admin_url('options-general.php?page=htbp-settings')); exit;
+});
+add_action('admin_post_htbp_clear', function(){
+  if (!current_user_can('manage_options')) wp_die('Unauthorized');
+  check_admin_referer('htbp_clear_nonce');
+  $id = htbp_resolve_id('');
+  if ($id) htbp_clear_cache($id);
+  set_transient('htbp_test_result',['ok'=>true,'data'=>['message'=>'Cache cleared'],'src'=>'cache'],60);
+  wp_safe_redirect(admin_url('options-general.php?page=htbp-settings')); exit;
+});
+add_action('admin_notices', function(){
+  if (!isset($_GET['page']) || $_GET['page']!=='htbp-settings') return;
+  $res = get_transient('htbp_test_result'); if (!$res) return; delete_transient('htbp_test_result');
+  $cls = !empty($res['ok']) ? 'notice-success' : 'notice-error';
+  echo '<div class="notice '.esc_attr($cls).' is-dismissible"><p><strong>HTB:</strong> ';
+  if (!empty($res['ok'])) {
+    echo 'OK (source: '.esc_html($res['src']).')</p><pre style="max-height:220px;overflow:auto;background:#111;color:#cde5db;padding:8px;border-radius:6px;">'
+        . esc_html(wp_json_encode($res['data'], JSON_PRETTY_PRINT)) . '</pre>';
+  } else {
+    echo 'ERROR '.esc_html($res['src']).': '.esc_html($res['err']).'</p>';
   }
-
   echo '</div>';
 });
 
+/* Friendly reminder if no global ID set */
+add_action('admin_notices', function () {
+  if (!current_user_can('manage_options')) return;
+  $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+  if ($screen && $screen->base === 'settings_page_htbp-settings') return;
+  $id = trim((string) htbp_get_options()['id']);
+  if ($id === '') {
+    $url = admin_url('options-general.php?page=htbp-settings');
+    echo '<div class="notice notice-warning is-dismissible"><p>'
+       . 'HTB Pro Card: Set your global <strong>HTB User ID</strong> in '
+       . '<a href="'.esc_url($url).'">Settings → HTB Pro Card</a> to avoid “missing user id” messages.'
+       . '</p></div>';
+  }
+});
