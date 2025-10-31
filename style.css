@@ -1,0 +1,59 @@
+/* Defaults via CSS variables; theme/user may override */
+.wp-block-htb-pro-card, .htb-card, .htb-scope {
+  --htb-gap: 16px;
+  --htb-padding: 16px;
+  --htb-radius: 12px;
+  --htb-border: #123;
+  --htb-chip-bg: #0f2a22;
+  --htb-chip-fg: #cde5db;
+  --htb-chip-border: #1f3a32;
+  --htb-cta-bg: #115a46;
+  --htb-cta-fg: #eafff6;
+  --htb-cta-border: #1f7a62;
+  --htb-prog-bar: #1aa36b;
+  --htb-prog-track: #10251e;
+  --htb-prog-text: #cde5db;
+
+  display: flex;
+  align-items: center;
+  gap: var(--htb-gap);
+  padding: var(--htb-padding);
+  border-radius: var(--htb-radius);
+  border: 1px solid var(--htb-border);
+  color: inherit;
+}
+
+/* Compact style: tighter spacing by default (overridden by user padding) */
+.wp-block-htb-pro-card.is-style-compact, .htb-card.is-style-compact { --htb-gap: 8px; --htb-padding: 8px; --htb-radius: 8px; }
+
+/* Detailed style: roomier spacing */
+.wp-block-htb-pro-card.is-style-detailed, .htb-card.is-style-detailed { --htb-gap: 20px; --htb-padding: 24px; --htb-radius: 14px; }
+
+/* Keep badge image tidy */
+.wp-block-htb-pro-card img, .htb-card img {
+  max-width: 100%;
+  height: auto;
+}
+
+.wp-block-htb-pro-card .htb-main, .htb-card .htb-main { flex: 1 1 auto; min-width: 0; }
+.wp-block-htb-pro-card .htb-name, .htb-card .htb-name {
+  font-weight: 700; font-size: 18px; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wp-block-htb-pro-card .htb-chips, .htb-card .htb-chips { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+.wp-block-htb-pro-card .htb-chip, .htb-card .htb-chip, .htb-scope .htb-chip {
+  background: var(--htb-chip-bg);
+  color: var(--htb-chip-fg);
+  border: 1px solid var(--htb-chip-border);
+  border-radius: 999px;
+  padding: 4px 8px;
+}
+.wp-block-htb-pro-card .htb-cta, .htb-card .htb-cta { margin-top: 10px; }
+.wp-block-htb-pro-card .htb-cta a, .htb-card .htb-cta a {
+  display: inline-block;
+  background: var(--htb-cta-bg);
+  color: var(--htb-cta-fg);
+  border: 1px solid var(--htb-cta-border);
+  text-decoration: none;
+  padding: 6px 10px;
+  border-radius: 8px;
+}
